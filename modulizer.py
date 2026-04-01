@@ -2,9 +2,8 @@
 """
 Modularize a large Python file into cohesive modules with (optional) AI assistance.
 Uses the OpenAI Python SDK (openai.OpenAI) for chat completions when not in offline mode.
-Defaults target AIMLAPI at https://ai.aimlapi.com; override with OPENAI_BASE_URL or config.
 """
-# gawk gawk gawk meoww
+# gawk gawk gawk meoww 
 
 from __future__ import annotations
 
@@ -1254,6 +1253,7 @@ class ModuleWriter:
     ) -> Path:
         output_dir.mkdir(parents=True, exist_ok=True)
         seg_map = {seg.identifier: seg for seg in segments}
+        plan = self._merge_cyclic_modules(plan, segments)
         manifest_path = output_dir / "module_plan.json"
         written_files: List[str] = []
         
@@ -1647,6 +1647,108 @@ class ModuleWriter:
 
         stem_to_file = {Path(f).stem: f for f in written_files}
         return [stem_to_file[s] for s in order if s in stem_to_file]
+
+    @staticmethod
+    def _strongly_connected_components(graph: Dict[str, Set[str]]) -> List[List[str]]:
+        index: Dict[str, int] = {}
+        lowlink: Dict[str, int] = {}
+        stack: List[str] = []
+        on_stack: Set[str] = set()
+        result: List[List[str]] = []
+
+        def strongconnect(node: str) -> None:
+            index[node] = len(index)
+            lowlink[node] = index[node]
+            stack.append(node)
+            on_stack.add(node)
+
+            for neighbor in graph.get(node, set()):
+                if neighbor not in index:
+                    strongconnect(neighbor)
+                    lowlink[node] = min(lowlink[node], lowlink[neighbor])
+                elif neighbor in on_stack:
+                    lowlink[node] = min(lowlink[node], index[neighbor])
+
+            if lowlink[node] == index[node]:
+                component: List[str] = []
+                while True:
+                    w = stack.pop()
+                    on_stack.remove(w)
+                    component.append(w)
+                    if w == node:
+                        break
+                result.append(component)
+
+        for node in graph:
+            if node not in index:
+                strongconnect(node)
+
+        return result
+
+    @staticmethod
+    def _merge_cyclic_modules(plan: Dict[str, Any], segments: Sequence[Segment]) -> Dict[str, Any]:
+        modules = [m for m in plan.get("modules", []) if isinstance(m, dict)]
+        if not modules:
+            return plan
+
+        metadata = [
+            {"segment_id": seg.identifier, "dependencies": seg.dependencies}
+            for seg in segments
+        ]
+        module_deps = LLMPlanner._build_module_dependencies({"modules": modules}, metadata)
+        sccs = ModuleWriter._strongly_connected_components(module_deps)
+        cyclic_groups = [sorted(comp) for comp in sccs if len(comp) > 1]
+        if not cyclic_groups:
+            return plan
+
+        module_map = {module["name"]: module for module in modules}
+        merged_modules: List[Dict[str, Any]] = []
+        merged_names: Set[str] = set()
+
+        for cycle in cyclic_groups:
+            merged_names.update(cycle)
+            merged_segment_ids: List[str] = []
+            seen_segments: Set[str] = set()
+            descriptions: List[str] = []
+            for module_name in cycle:
+                module = module_map.get(module_name)
+                if not module:
+                    continue
+                if desc := str(module.get("description", "")).strip():
+                    descriptions.append(desc)
+                for seg_id in module.get("segment_ids", []):
+                    if seg_id not in seen_segments:
+                        merged_segment_ids.append(seg_id)
+                        seen_segments.add(seg_id)
+
+            merged_name = "_".join(cycle)
+            merged_description = (
+                " / ".join(dict.fromkeys(descriptions))
+                or f"Merged cyclic modules: {', '.join(cycle)}"
+            )
+            merged_modules.append(
+                {
+                    "name": merged_name,
+                    "description": merged_description,
+                    "segment_ids": merged_segment_ids,
+                }
+            )
+
+        final_modules: List[Dict[str, Any]] = []
+        for module in modules:
+            if module["name"] not in merged_names:
+                final_modules.append(module)
+        final_modules.extend(merged_modules)
+
+        merged_plan = dict(plan)
+        merged_plan["modules"] = final_modules
+        merged_notes = str(plan.get("notes", "")).strip()
+        merged_plan["notes"] = (
+            f"{merged_notes}\nAuto-merged cyclic modules: {', '.join(sorted([n for group in cyclic_groups for n in group]))}."
+            if merged_notes
+            else f"Auto-merged cyclic modules: {', '.join(sorted([n for group in cyclic_groups for n in group]))}."
+        )
+        return merged_plan
 
     @staticmethod
     def _validate_modules(output_dir: Path, written_files: List[str]) -> Dict[str, Any]:
