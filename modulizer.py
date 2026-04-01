@@ -1211,6 +1211,30 @@ class ModuleWriter:
     def __init__(self, add_banner: bool = True) -> None:
         self.add_banner = add_banner
 
+    @staticmethod
+    def _strip_future_imports(code: str) -> Tuple[str, List[str]]:
+        """Remove top-level ``from __future__ import ...`` lines; return (body, future lines)."""
+        lines = code.splitlines(keepends=True)
+        kept: List[str] = []
+        futures: List[str] = []
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("from __future__ import"):
+                futures.append(line.strip())
+            else:
+                kept.append(line)
+        return "".join(kept), futures
+
+    @staticmethod
+    def _merge_future_imports(chunks: List[str]) -> List[str]:
+        seen: Set[str] = set()
+        out: List[str] = []
+        for ch in chunks:
+            if ch not in seen:
+                seen.add(ch)
+                out.append(ch)
+        return sorted(out)
+
     def write(
         self,
         plan: Dict[str, Any],
@@ -1271,6 +1295,8 @@ class ModuleWriter:
             module_dependencies = set()
             module_used_attributes: List[Tuple[str, str]] = []
             written_segment_ids = set()
+            locally_defined: Set[str] = set()
+            future_chunks: List[str] = []
             
             for seg_id in module.get("segment_ids", []):
                 # Check for duplicate writes (same segment in module)
@@ -1283,9 +1309,14 @@ class ModuleWriter:
                 if not seg:
                     typer.echo(f"Warning: missing segment {seg_id}", err=True)
                     continue
-                module_code += f"# --- segment {seg.identifier} ({seg.kind}) ---\n{seg.code}\n\n"
+                locally_defined.update(seg.defined_symbols)
+                body, fut_lines = self._strip_future_imports(seg.code)
+                future_chunks.extend(fut_lines)
+                module_code += f"# --- segment {seg.identifier} ({seg.kind}) ---\n{body}\n\n"
                 module_dependencies.update(seg.dependencies)
                 module_used_attributes.extend(seg.used_attributes)
+
+            future_lines = self._merge_future_imports(future_chunks)
 
             # Determine which imports this module needs (including cross-module imports)
             needed_imports = self._get_needed_imports(
@@ -1295,6 +1326,7 @@ class ModuleWriter:
                 safe_name,
                 used_attributes=module_used_attributes,
                 symbol_to_slug=symbol_to_slug,
+                locally_defined=locally_defined,
             )
             
             with target.open("w", encoding="utf-8") as handle:
@@ -1309,8 +1341,12 @@ class ModuleWriter:
                         ).strip()
                         + "\n\n"
                     )
+
+                # __future__ must appear before other imports (after module docstring).
+                if future_lines:
+                    handle.write("\n".join(future_lines) + "\n\n")
                 
-                # Write imports first
+                # Other imports
                 if needed_imports:
                     handle.write("\n".join(needed_imports) + "\n\n")
                 
@@ -1426,6 +1462,7 @@ class ModuleWriter:
         current_module_name: str,
         used_attributes: List[Tuple[str, str]] = None,
         symbol_to_slug: Optional[Dict[str, str]] = None,
+        locally_defined: Optional[Set[str]] = None,
     ) -> List[str]:
         """
         Determine which imports this module needs.
@@ -1442,6 +1479,8 @@ class ModuleWriter:
             used_attributes = []
         if symbol_to_slug is None:
             symbol_to_slug = {}
+        if locally_defined is None:
+            locally_defined = set()
         
         attribute_names = {attr for obj, attr in used_attributes}
         needed_imports = []
@@ -1449,7 +1488,9 @@ class ModuleWriter:
         cross_module_deps = {
             dep_name
             for dep_name in dependencies
-            if dep_name in symbol_to_slug and symbol_to_slug.get(dep_name) != current_module_name
+            if dep_name not in locally_defined
+            and dep_name in symbol_to_slug
+            and symbol_to_slug.get(dep_name) != current_module_name
         }
 
         def _filter_import_stmt(import_stmt: str, keep_names: List[str]) -> Optional[str]:
@@ -1503,6 +1544,8 @@ class ModuleWriter:
         for dep_name in sorted(dependencies):
             if dep_name in attribute_names:
                 continue
+            if dep_name in locally_defined:
+                continue
             target_slug = symbol_to_slug.get(dep_name)
             if not target_slug or target_slug == current_module_name:
                 continue
@@ -1552,6 +1595,51 @@ class ModuleWriter:
         return names
 
     @staticmethod
+    def _sort_modules_for_validation(output_dir: Path, written_files: List[str]) -> List[str]:
+        """Order modules so relative imports load dependencies first (best-effort; cycles fall back)."""
+        stems = {Path(f).stem for f in written_files}
+        if len(stems) <= 1:
+            return list(written_files)
+
+        graph: Dict[str, Set[str]] = {Path(f).stem: set() for f in written_files}
+        indegree: Dict[str, int] = {Path(f).stem: 0 for f in written_files}
+
+        rel_imp = re.compile(r"^\s*from \.([a-zA-Z_][a-zA-Z0-9_]*) import ", re.MULTILINE)
+        for filename in written_files:
+            stem = Path(filename).stem
+            path = output_dir / filename
+            try:
+                code = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for m in rel_imp.finditer(code):
+                dep = m.group(1)
+                if dep not in stems or dep == stem:
+                    continue
+                # dep must load before stem -> edge dep -> stem
+                if stem not in graph[dep]:
+                    graph[dep].add(stem)
+                    indegree[stem] = indegree.get(stem, 0) + 1
+
+        queue = [s for s in indegree if indegree[s] == 0]
+        queue.sort()
+        order: List[str] = []
+        while queue:
+            n = queue.pop(0)
+            order.append(n)
+            for nbr in sorted(graph.get(n, ())):
+                indegree[nbr] -= 1
+                if indegree[nbr] == 0:
+                    queue.append(nbr)
+                    queue.sort()
+
+        if len(order) != len(stems):
+            return list(written_files)
+
+        stem_to_file = {Path(f).stem: f for f in written_files}
+        return [stem_to_file[s] for s in order if s in stem_to_file]
+
+    @staticmethod
     def _validate_modules(output_dir: Path, written_files: List[str]) -> Dict[str, Any]:
         """
         COMPREHENSIVE validation of generated modules:
@@ -1573,7 +1661,8 @@ class ModuleWriter:
             inserted_path = True
         
         try:
-            for filename in written_files:
+            ordered_files = ModuleWriter._sort_modules_for_validation(output_dir, written_files)
+            for filename in ordered_files:
                 filepath = output_dir / filename
                 module_name = filepath.stem
                 fq_module_name = f"{package_name}.{module_name}"
