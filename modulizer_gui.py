@@ -8,12 +8,31 @@ from __future__ import annotations
 import subprocess
 import threading
 from pathlib import Path
+import importlib.util
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import typer
 
-import modulizer
+HERE = Path(__file__).resolve().parent
+LOCAL_MODULIZER_PATH = HERE / "modulizer.py"
+if not LOCAL_MODULIZER_PATH.exists():
+    raise FileNotFoundError(f"Could not find local modulizer.py at {LOCAL_MODULIZER_PATH}")
+
+spec = importlib.util.spec_from_file_location("modulizer_gui_local_modulizer", LOCAL_MODULIZER_PATH)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Failed to load modulizer module from {LOCAL_MODULIZER_PATH}")
+modulizer = importlib.util.module_from_spec(spec)
+if modulizer is None:
+    raise ImportError(f"Failed to create module object from spec for {LOCAL_MODULIZER_PATH}")
+
+sys.modules[spec.name] = modulizer
+try:
+    spec.loader.exec_module(modulizer)
+except Exception:
+    del sys.modules[spec.name]
+    raise
 
 
 class ModulizerGUI:
@@ -24,9 +43,9 @@ class ModulizerGUI:
 
         self.input_file = tk.StringVar()
         self.output_dir = tk.StringVar()
-        self.model = tk.StringVar(value="gemini-2.5-flash")
+        self.model = tk.StringVar(value=modulizer.LLMPlanner.DEFAULT_MODEL)
         self.api_key = tk.StringVar()
-        self.openai_base_url = tk.StringVar(value="https://generativelanguage.googleapis.com/v1beta/openai")
+        self.openai_base_url = tk.StringVar(value=modulizer.LLMPlanner.DEFAULT_BASE_URL)
         self.semantic_keywords = tk.StringVar()
 
         self.offline = tk.BooleanVar(value=False)
@@ -171,8 +190,8 @@ class ModulizerGUI:
         inp = self.input_file.get().strip()
         out = self.output_dir.get().strip()
         args: list[str] = [
-            "python",
-            "modulizer.py",
+            sys.executable,
+            str(LOCAL_MODULIZER_PATH),
             "modularize",
             "--input-file",
             inp or ".",
@@ -216,13 +235,13 @@ class ModulizerGUI:
             self._modularize_command_line(),
             "",
             "# Optional: create a JSON config template",
-            subprocess.list2cmdline(["python", "modulizer.py", "init-config", "--output-file", "modulizer_config.json"]),
+            subprocess.list2cmdline([sys.executable, str(LOCAL_MODULIZER_PATH), "init-config", "--output-file", "modulizer_config.json"]),
             "",
             "# Modularize using that config",
             subprocess.list2cmdline(
                 [
-                    "python",
-                    "modulizer.py",
+                    sys.executable,
+                    str(LOCAL_MODULIZER_PATH),
                     "modularize",
                     "--input-file",
                     self.input_file.get().strip() or "your_script.py",
