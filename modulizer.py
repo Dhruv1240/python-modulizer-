@@ -1661,114 +1661,32 @@ class ModuleWriter:
     ) -> Path:
         output_dir.mkdir(parents=True, exist_ok=True)
         seg_map = {seg.identifier: seg for seg in segments}
+        plan = self._promote_runtime_architecture(plan, segments)
         plan = self._merge_cyclic_modules(plan, segments)
         manifest_path = output_dir / "module_plan.json"
+        previous_written_files: Set[str] = set()
         written_files: List[str] = []
-        
-        # Check for duplicates in the plan
-        all_segment_ids = []
-        for module in plan.get("modules", []):
-            all_segment_ids.extend(module.get("segment_ids", []))
-        
-        if len(all_segment_ids) != len(set(all_segment_ids)):
-            typer.echo("Warning: Duplicate segments detected in plan!", err=True)
 
-        all_imports = self._extract_imports(source_code)
-        names_from_imports = self._names_bound_by_imports(all_imports)
-        dependency_errors = self._check_dependency_coverage(plan, segments, names_from_imports)
-        if dependency_errors:
-            for err in dependency_errors:
-                typer.echo(f"Validation warning: {err}", err=True)
-            if strict_validation:
-                raise RuntimeError("Plan dependency coverage validation failed in strict mode.")
-
-        # symbol -> slugified filename stem for cross-module imports
-        symbol_to_slug: Dict[str, str] = {}
-        ambiguous_symbols: Set[str] = set()
-        for module in plan.get("modules", []):
-            safe = self._slugify(module["name"])
-            for seg_id in module.get("segment_ids", []):
-                seg = seg_map.get(seg_id)
-                if not seg:
-                    continue
-                for sym in seg.defined_symbols:
-                    if sym in symbol_to_slug and symbol_to_slug[sym] != safe:
-                        ambiguous_symbols.add(sym)
-                    else:
-                        symbol_to_slug[sym] = safe
-        for sym in ambiguous_symbols:
-            symbol_to_slug.pop(sym, None)
-
-        for module in plan.get("modules", []):
-            raw_name = module["name"]
-            safe_name = self._slugify(raw_name)
-            
-            target = output_dir / f"{safe_name}.py"
-            written_files.append(target.name)
-            
-            # Collect all code for this module
-            module_code = ""
-            module_dependencies = set()
-            module_used_attributes: List[Tuple[str, str]] = []
-            written_segment_ids = set()
-            locally_defined: Set[str] = set()
-            future_chunks: List[str] = []
-            
-            for seg_id in module.get("segment_ids", []):
-                # Check for duplicate writes (same segment in module)
-                if seg_id in written_segment_ids:
-                    typer.echo(f"Warning: Segment {seg_id} already written to module {raw_name}", err=True)
-                    continue
-                written_segment_ids.add(seg_id)
-                
-                seg = seg_map.get(seg_id)
-                if not seg:
-                    typer.echo(f"Warning: missing segment {seg_id}", err=True)
-                    continue
-                locally_defined.update(seg.defined_symbols)
-                body, fut_lines = self._strip_future_imports(seg.code)
-                future_chunks.extend(fut_lines)
-                module_code += f"# --- segment {seg.identifier} ({seg.kind}) ---\n{body}\n\n"
-                module_dependencies.update(seg.dependencies)
-                module_used_attributes.extend(seg.used_attributes)
-
-            global_future_lines = self._extract_future_imports(source_code)
-            future_lines = self._merge_future_imports(future_chunks + global_future_lines)
-
-            # Determine which imports this module needs (including cross-module imports)
-            needed_imports = self._get_needed_imports(
-                all_imports, 
-                module_code, 
-                module_dependencies,
-                safe_name,
-                used_attributes=module_used_attributes,
-                symbol_to_slug=symbol_to_slug,
-                locally_defined=locally_defined,
+        for cycle_fix_pass in range(3):
+            written_files = self._write_modules_once(
+                plan=plan,
+                segments=segments,
+                output_dir=output_dir,
+                original_name=original_name,
+                source_code=source_code,
+                previous_written_files=previous_written_files,
             )
-            
-            with target.open("w", encoding="utf-8") as handle:
-                if self.add_banner:
-                    handle.write(
-                        textwrap.dedent(
-                            f'''"""
-                            Auto-generated module from {original_name}
-                            Plan summary: {module.get("description","(no description)")}
-                            """
-                            '''
-                        ).strip()
-                        + "\n\n"
-                    )
+            previous_written_files = set(written_files)
 
-                # __future__ must appear before other imports (after module docstring).
-                if future_lines:
-                    handle.write("\n".join(future_lines) + "\n\n")
-                
-                # Other imports
-                if needed_imports:
-                    handle.write("\n".join(needed_imports) + "\n\n")
-                
-                # Write the module code
-                handle.write(module_code)
+            import_cycles = self._detect_generated_import_cycles(output_dir, written_files)
+            if not import_cycles:
+                break
+
+            typer.echo(
+                "Detected generated import cycles; merging affected modules and rewriting package.",
+                err=True,
+            )
+            plan = self._merge_modules_by_generated_cycles(plan, import_cycles)
 
         manifest_payload = {
             "original_file": original_name,
@@ -1789,6 +1707,244 @@ class ModuleWriter:
             )
         
         return manifest_path
+
+    @staticmethod
+    def _promote_runtime_architecture(
+        plan: Dict[str, Any],
+        segments: Sequence[Segment],
+    ) -> Dict[str, Any]:
+        modules = [m for m in plan.get("modules", []) if isinstance(m, dict)]
+        if not modules:
+            return plan
+
+        seg_map = {seg.identifier: seg for seg in segments}
+        symbol_to_segment: Dict[str, str] = {}
+        symbol_usage: Dict[str, int] = {}
+        for seg in segments:
+            for sym in seg.defined_symbols:
+                symbol_to_segment.setdefault(sym, seg.identifier)
+            for dep in seg.dependencies:
+                symbol_usage[dep] = symbol_usage.get(dep, 0) + 1
+
+        def is_startup_segment(seg: Segment) -> bool:
+            code = seg.code
+            return (
+                "bot.run(" in code
+                or 'TOKEN not found in environment variables' in code
+                or "Starting Auraxis Bot" in code
+                or "print(\"=\" * 50)" in code
+            )
+
+        def is_runtime_seed(seg: Segment) -> bool:
+            lowered = seg.name.lower()
+            code = seg.code.lower()
+            if lowered in {"on_ready", "on_message", "get_prefix", "get_guild_prefix", "channel_command_gate"}:
+                return True
+            if any(
+                token in lowered
+                for token in [
+                    "load_", "save_", "json", "config", "data", "prefix", "channel",
+                    "guild", "normalize", "duplicate", "hindi", "rank", "apply_aura",
+                    "log_aura_change", "calculate_ai_aura", "evaluate_toxic", "bot",
+                ]
+            ):
+                return True
+            if any(
+                token in code
+                for token in [
+                    "commands.bot(",
+                    "discord.intents",
+                    "os.getenv(\"token\")",
+                    "os.getenv('token')",
+                    "openrouter_api_key",
+                    "load_json_safe(",
+                    "config_data =",
+                    "aura_data =",
+                    "global_data =",
+                    "recent_messages =",
+                ]
+            ):
+                return True
+            if max((symbol_usage.get(sym, 0) for sym in seg.defined_symbols), default=0) >= 4:
+                return True
+            return False
+
+        startup_ids: Set[str] = {seg.identifier for seg in segments if is_startup_segment(seg)}
+        runtime_ids: Set[str] = {seg.identifier for seg in segments if is_runtime_seed(seg)}
+
+        changed = True
+        while changed:
+            changed = False
+            for seg_id in list(runtime_ids):
+                seg = seg_map.get(seg_id)
+                if not seg:
+                    continue
+                for dep in seg.dependencies:
+                    target_id = symbol_to_segment.get(dep)
+                    if target_id and target_id not in runtime_ids and target_id not in startup_ids:
+                        runtime_ids.add(target_id)
+                        changed = True
+
+        runtime_ids.difference_update(startup_ids)
+        if not runtime_ids:
+            return plan
+
+        existing_modules: List[Dict[str, Any]] = []
+        used_names: Set[str] = set()
+        for module in modules:
+            cleaned_segment_ids = [
+                seg_id for seg_id in module.get("segment_ids", [])
+                if isinstance(seg_id, str)
+                and seg_id not in runtime_ids
+                and seg_id not in startup_ids
+            ]
+            if cleaned_segment_ids:
+                updated = dict(module)
+                updated["segment_ids"] = cleaned_segment_ids
+                existing_modules.append(updated)
+                used_names.add(str(updated.get("name", "")))
+
+        runtime_name = "runtime_core"
+        main_name = "main"
+        while runtime_name in used_names:
+            runtime_name += "_1"
+        used_names.add(runtime_name)
+        while main_name in used_names:
+            main_name += "_1"
+
+        existing_modules.append(
+            {
+                "name": runtime_name,
+                "description": "Runtime spine: bot object, shared state, bootstrap dependencies, and high-coupling core logic.",
+                "segment_ids": sorted(runtime_ids, key=lambda seg_id: seg_map[seg_id].start_line),
+            }
+        )
+        if startup_ids:
+            existing_modules.append(
+                {
+                    "name": main_name,
+                    "description": "Dedicated entrypoint module for startup checks and bot.run(...).",
+                    "segment_ids": sorted(startup_ids, key=lambda seg_id: seg_map[seg_id].start_line),
+                }
+            )
+
+        new_plan = dict(plan)
+        new_plan["modules"] = existing_modules
+        notes = str(plan.get("notes", "")).strip()
+        extra = "Promoted runtime architecture: isolated runtime_core and main entrypoint before writing modules."
+        new_plan["notes"] = f"{notes}\n{extra}".strip() if notes else extra
+        return new_plan
+
+    def _write_modules_once(
+        self,
+        plan: Dict[str, Any],
+        segments: Sequence[Segment],
+        output_dir: Path,
+        original_name: str,
+        source_code: str,
+        previous_written_files: Set[str],
+    ) -> List[str]:
+        seg_map = {seg.identifier: seg for seg in segments}
+        written_files: List[str] = []
+
+        all_segment_ids = []
+        for module in plan.get("modules", []):
+            all_segment_ids.extend(module.get("segment_ids", []))
+        if len(all_segment_ids) != len(set(all_segment_ids)):
+            typer.echo("Warning: Duplicate segments detected in plan!", err=True)
+
+        all_imports = self._extract_imports(source_code)
+        names_from_imports = self._names_bound_by_imports(all_imports)
+        dependency_errors = self._check_dependency_coverage(plan, segments, names_from_imports)
+        for err in dependency_errors:
+            typer.echo(f"Validation warning: {err}", err=True)
+
+        symbol_to_slug: Dict[str, str] = {}
+        ambiguous_symbols: Set[str] = set()
+        for module in plan.get("modules", []):
+            safe = self._slugify(module["name"])
+            for seg_id in module.get("segment_ids", []):
+                seg = seg_map.get(seg_id)
+                if not seg:
+                    continue
+                for sym in seg.defined_symbols:
+                    if sym in symbol_to_slug and symbol_to_slug[sym] != safe:
+                        ambiguous_symbols.add(sym)
+                    else:
+                        symbol_to_slug[sym] = safe
+        for sym in ambiguous_symbols:
+            symbol_to_slug.pop(sym, None)
+
+        for module in plan.get("modules", []):
+            raw_name = module["name"]
+            safe_name = self._slugify(raw_name)
+            target = output_dir / f"{safe_name}.py"
+            written_files.append(target.name)
+
+            module_code = ""
+            module_dependencies = set()
+            module_used_attributes: List[Tuple[str, str]] = []
+            written_segment_ids = set()
+            locally_defined: Set[str] = set()
+            future_chunks: List[str] = []
+
+            for seg_id in module.get("segment_ids", []):
+                if seg_id in written_segment_ids:
+                    typer.echo(f"Warning: Segment {seg_id} already written to module {raw_name}", err=True)
+                    continue
+                written_segment_ids.add(seg_id)
+
+                seg = seg_map.get(seg_id)
+                if not seg:
+                    typer.echo(f"Warning: missing segment {seg_id}", err=True)
+                    continue
+                locally_defined.update(seg.defined_symbols)
+                body, fut_lines = self._strip_future_imports(seg.code)
+                future_chunks.extend(fut_lines)
+                module_code += f"# --- segment {seg.identifier} ({seg.kind}) ---\n{body}\n\n"
+                module_dependencies.update(seg.dependencies)
+                module_used_attributes.extend(seg.used_attributes)
+
+            global_future_lines = self._extract_future_imports(source_code)
+            future_lines = self._merge_future_imports(future_chunks + global_future_lines)
+            needed_imports = self._get_needed_imports(
+                all_imports,
+                module_code,
+                module_dependencies,
+                safe_name,
+                used_attributes=module_used_attributes,
+                symbol_to_slug=symbol_to_slug,
+                locally_defined=locally_defined,
+            )
+
+            with target.open("w", encoding="utf-8") as handle:
+                if self.add_banner:
+                    handle.write(
+                        textwrap.dedent(
+                            f'''"""
+                            Auto-generated module from {original_name}
+                            Plan summary: {module.get("description","(no description)")}
+                            """
+                            '''
+                        ).strip()
+                        + "\n\n"
+                    )
+                if future_lines:
+                    handle.write("\n".join(future_lines) + "\n\n")
+                if needed_imports:
+                    handle.write("\n".join(needed_imports) + "\n\n")
+                handle.write(module_code)
+
+        obsolete = previous_written_files - set(written_files)
+        for filename in obsolete:
+            target = output_dir / filename
+            if target.exists():
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+
+        return written_files
 
     @staticmethod
     def _names_bound_by_imports(all_imports: List[Tuple[str, List[str]]]) -> Set[str]:
@@ -2032,6 +2188,99 @@ class ModuleWriter:
         return names
 
     @staticmethod
+    def _detect_generated_import_cycles(output_dir: Path, written_files: List[str]) -> List[List[str]]:
+        graph = ModuleWriter._build_generated_import_graph(output_dir, written_files)
+        sccs = ModuleWriter._strongly_connected_components(graph)
+        return [sorted(component) for component in sccs if len(component) > 1]
+
+    @staticmethod
+    def _build_generated_import_graph(output_dir: Path, written_files: List[str]) -> Dict[str, Set[str]]:
+        graph: Dict[str, Set[str]] = {}
+        module_names = {Path(filename).stem for filename in written_files if filename.endswith(".py")}
+
+        for filename in written_files:
+            if not filename.endswith(".py"):
+                continue
+            module_name = Path(filename).stem
+            graph.setdefault(module_name, set())
+            filepath = output_dir / filename
+            try:
+                tree = ast.parse(filepath.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                if node.level <= 0 or not node.module:
+                    continue
+                imported_module = node.module.split(".", 1)[0]
+                if imported_module in module_names and imported_module != module_name:
+                    graph[module_name].add(imported_module)
+
+        return graph
+
+    def _merge_modules_by_generated_cycles(
+        self,
+        plan: Dict[str, Any],
+        import_cycles: List[List[str]],
+    ) -> Dict[str, Any]:
+        modules = [m for m in plan.get("modules", []) if isinstance(m, dict)]
+        if not modules or not import_cycles:
+            return plan
+
+        slug_to_module = {self._slugify(str(module.get("name", ""))): module for module in modules}
+        merged_modules: List[Dict[str, Any]] = []
+        merged_slugs: Set[str] = set()
+
+        for cycle in import_cycles:
+            cycle_modules = [slug_to_module[slug] for slug in cycle if slug in slug_to_module]
+            if len(cycle_modules) < 2:
+                continue
+
+            merged_slugs.update(cycle)
+            descriptions: List[str] = []
+            merged_segment_ids: List[str] = []
+            seen_segments: Set[str] = set()
+            merged_name_parts: List[str] = []
+
+            for module in cycle_modules:
+                module_name = str(module.get("name", "")).strip()
+                if module_name:
+                    merged_name_parts.append(self._slugify(module_name))
+                description = str(module.get("description", "")).strip()
+                if description:
+                    descriptions.append(description)
+                for seg_id in module.get("segment_ids", []):
+                    if isinstance(seg_id, str) and seg_id not in seen_segments:
+                        seen_segments.add(seg_id)
+                        merged_segment_ids.append(seg_id)
+
+            merged_name = "_".join(dict.fromkeys(merged_name_parts)) or "merged_cycle_module"
+            merged_modules.append(
+                {
+                    "name": merged_name,
+                    "description": " / ".join(dict.fromkeys(descriptions))
+                    or f"Merged generated import cycle: {', '.join(cycle)}",
+                    "segment_ids": merged_segment_ids,
+                }
+            )
+
+        final_modules: List[Dict[str, Any]] = []
+        for module in modules:
+            slug = self._slugify(str(module.get("name", "")))
+            if slug not in merged_slugs:
+                final_modules.append(module)
+        final_modules.extend(merged_modules)
+
+        merged_plan = dict(plan)
+        merged_plan["modules"] = final_modules
+        merged_notes = str(plan.get("notes", "")).strip()
+        cycle_note = "Auto-merged modules to resolve generated import cycles."
+        merged_plan["notes"] = f"{merged_notes}\n{cycle_note}".strip()
+        return merged_plan
+
+    @staticmethod
     def _sort_modules_for_validation(output_dir: Path, written_files: List[str]) -> List[str]:
         """Order modules so relative imports load dependencies first (best-effort; cycles fall back)."""
         stems = {Path(f).stem for f in written_files}
@@ -2272,6 +2521,12 @@ class ModuleWriter:
                     typer.echo(f"{status} {filename} - {error_msg[:140]}", err=True)
                 else:
                     typer.echo(f"{status} {filename} is valid and executable", err=True)
+
+            import_cycles = ModuleWriter._detect_generated_import_cycles(output_dir, written_files)
+            if import_cycles:
+                all_valid = False
+                cycle_info = ", ".join(" -> ".join(cycle + [cycle[0]]) for cycle in import_cycles)
+                typer.echo(f"❌ Generated import cycles remain: {cycle_info}", err=True)
         finally:
             if inserted_path:
                 try:

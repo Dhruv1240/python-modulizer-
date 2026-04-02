@@ -5,6 +5,7 @@ Simple desktop UI for modulizer.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 from pathlib import Path
@@ -45,6 +46,9 @@ class ModulizerGUI:
         self.input_file = tk.StringVar()
         self.output_dir = tk.StringVar()
         self.created_location = tk.StringVar(value="Not created yet.")
+        self.entrypoint_module = tk.StringVar(value="Not detected yet.")
+        self.run_command = tk.StringVar(value="Run a modularization first.")
+        self.architecture_mode = tk.StringVar(value="Not detected yet.")
         self.model = tk.StringVar(value=modulizer.LLMPlanner.DEFAULT_MODEL)
         self.planning_mode = tk.StringVar(value="safe")
         self.api_key = tk.StringVar()
@@ -114,32 +118,45 @@ class ModulizerGUI:
         ttk.Button(location_frame, text="Open Folder", command=self._open_created_location).grid(row=0, column=1, padx=8, pady=8)
         ttk.Button(location_frame, text="Copy Path", command=self._copy_created_location).grid(row=0, column=2, padx=8, pady=8)
 
-        ttk.Label(frm, text="Model").grid(row=5, column=0, sticky="w", **pad)
-        ttk.Entry(frm, textvariable=self.model).grid(row=5, column=1, columnspan=2, sticky="ew", **pad)
+        run_frame = ttk.LabelFrame(frm, text="Run Info")
+        run_frame.grid(row=5, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
+        run_frame.columnconfigure(1, weight=1)
+        ttk.Label(run_frame, text="Entrypoint").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        ttk.Entry(run_frame, textvariable=self.entrypoint_module, state="readonly").grid(row=0, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Label(run_frame, text="Architecture").grid(row=1, column=0, sticky="w", padx=8, pady=6)
+        ttk.Entry(run_frame, textvariable=self.architecture_mode, state="readonly").grid(row=1, column=1, sticky="ew", padx=8, pady=6)
+        ttk.Label(run_frame, text="Run command").grid(row=2, column=0, sticky="w", padx=8, pady=6)
+        ttk.Entry(run_frame, textvariable=self.run_command, state="readonly").grid(row=2, column=1, sticky="ew", padx=8, pady=6)
+        run_btns = ttk.Frame(run_frame)
+        run_btns.grid(row=2, column=2, padx=8, pady=6)
+        ttk.Button(run_btns, text="Copy Run Command", command=self._copy_run_command).pack(side="left")
 
-        ttk.Label(frm, text="Planning mode").grid(row=6, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="Model").grid(row=6, column=0, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=self.model).grid(row=6, column=1, columnspan=2, sticky="ew", **pad)
+
+        ttk.Label(frm, text="Planning mode").grid(row=7, column=0, sticky="w", **pad)
         planning_combo = ttk.Combobox(
             frm,
             textvariable=self.planning_mode,
             values=["safe", "hybrid", "ai_first"],
             state="readonly",
         )
-        planning_combo.grid(row=6, column=1, sticky="w", **pad)
+        planning_combo.grid(row=7, column=1, sticky="w", **pad)
         planning_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_planning_mode_changed())
         ttk.Label(
             frm,
             text="Safe = heuristics only, Hybrid = heuristics first with AI assist, AI-first = experimental.",
             foreground="#555555",
-        ).grid(row=6, column=2, sticky="w", padx=8, pady=6)
+        ).grid(row=7, column=2, sticky="w", padx=8, pady=6)
 
-        ttk.Label(frm, text="API key (optional if OPENAI_API_KEY is set)").grid(row=7, column=0, sticky="w", **pad)
-        ttk.Entry(frm, textvariable=self.api_key, show="*").grid(row=7, column=1, columnspan=2, sticky="ew", **pad)
+        ttk.Label(frm, text="API key (optional if OPENAI_API_KEY is set)").grid(row=8, column=0, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=self.api_key, show="*").grid(row=8, column=1, columnspan=2, sticky="ew", **pad)
 
-        ttk.Label(frm, text="API base URL (optional)").grid(row=8, column=0, sticky="w", **pad)
-        ttk.Entry(frm, textvariable=self.openai_base_url).grid(row=8, column=1, columnspan=2, sticky="ew", **pad)
+        ttk.Label(frm, text="API base URL (optional)").grid(row=9, column=0, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=self.openai_base_url).grid(row=9, column=1, columnspan=2, sticky="ew", **pad)
 
         numeric = ttk.LabelFrame(frm, text="Planning Controls")
-        numeric.grid(row=9, column=0, columnspan=3, sticky="ew", padx=8, pady=10)
+        numeric.grid(row=10, column=0, columnspan=3, sticky="ew", padx=8, pady=10)
         numeric.columnconfigure(1, weight=1)
         numeric.columnconfigure(3, weight=1)
         numeric.columnconfigure(5, weight=1)
@@ -163,7 +180,7 @@ class ModulizerGUI:
         ).grid(row=2, column=0, columnspan=6, sticky="w", padx=8, pady=(0, 6))
 
         advanced = ttk.LabelFrame(frm, text="Advanced AI Settings")
-        advanced.grid(row=10, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
+        advanced.grid(row=11, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
         advanced.columnconfigure(1, weight=1)
         advanced.columnconfigure(3, weight=1)
         advanced.columnconfigure(5, weight=1)
@@ -181,7 +198,7 @@ class ModulizerGUI:
         ttk.Spinbox(advanced, from_=-2.0, to=2.0, increment=0.1, textvariable=self.frequency_penalty, width=8).grid(row=1, column=1, sticky="w")
 
         toggles = ttk.Frame(frm)
-        toggles.grid(row=11, column=0, columnspan=3, sticky="w", padx=8, pady=6)
+        toggles.grid(row=12, column=0, columnspan=3, sticky="w", padx=8, pady=6)
         ttk.Checkbutton(toggles, text="Offline mode", variable=self.offline).grid(row=0, column=0, padx=6)
         ttk.Checkbutton(toggles, text="Strict validation", variable=self.strict_validation).grid(row=0, column=1, padx=6)
         ttk.Checkbutton(toggles, text="Semantic grouping", variable=self.semantic_grouping).grid(row=0, column=2, padx=6)
@@ -193,14 +210,14 @@ class ModulizerGUI:
         ).grid(row=0, column=4, padx=6)
 
         actions = ttk.Frame(frm)
-        actions.grid(row=12, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
+        actions.grid(row=13, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
         self.run_btn = ttk.Button(actions, text="Run Modularizer", command=self._start_run)
         self.run_btn.pack(side="left")
         ttk.Button(actions, text="Use Suggested Output Folder", command=self._apply_suggested_output_dir).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Quit", command=self.root.destroy).pack(side="right")
 
         cmd_frame = ttk.LabelFrame(frm, text="Commands (CLI)")
-        cmd_frame.grid(row=13, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
+        cmd_frame.grid(row=14, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
         cmd_frame.columnconfigure(0, weight=1)
         ttk.Label(
             cmd_frame,
@@ -220,14 +237,14 @@ class ModulizerGUI:
         self._refresh_commands_text()
 
         log_frame = ttk.LabelFrame(frm, text="Log")
-        log_frame.grid(row=14, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
-        frm.rowconfigure(14, weight=1)
+        log_frame.grid(row=15, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
+        frm.rowconfigure(15, weight=1)
 
         self.log = tk.Text(log_frame, wrap="word", height=18)
         self.log.pack(fill="both", expand=True, padx=6, pady=6)
 
         status = ttk.Label(frm, textvariable=self.status_text, anchor="w")
-        status.grid(row=15, column=0, columnspan=3, sticky="ew", padx=8, pady=6)
+        status.grid(row=16, column=0, columnspan=3, sticky="ew", padx=8, pady=6)
         self._on_planning_mode_changed()
 
     @staticmethod
@@ -292,6 +309,16 @@ class ModulizerGUI:
         self.root.clipboard_append(current)
         self.root.update_idletasks()
         self.status_text.set("Copied generated modules location.")
+
+    def _copy_run_command(self) -> None:
+        command = self.run_command.get().strip()
+        if not command or command == "Run a modularization first.":
+            messagebox.showinfo("No run command yet", "Run the modularizer first so the GUI can detect the generated entrypoint.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(command)
+        self.root.update_idletasks()
+        self.status_text.set("Copied run command.")
 
     def _open_created_location(self) -> None:
         raw = self.created_location.get().strip()
@@ -500,6 +527,7 @@ class ModulizerGUI:
         self.last_output_dir = output_dir
         self.last_manifest_path = output_dir / "module_plan.json"
         self._set_created_location(output_dir)
+        self._update_run_info()
         self._append_log("Done. Modularization completed.")
         self._append_log(f"Generated modules location: {output_dir}")
 
@@ -508,11 +536,60 @@ class ModulizerGUI:
             manifest_note = f"\nManifest: {self.last_manifest_path}"
             self._append_log(f"Manifest written to: {self.last_manifest_path}")
 
+        entrypoint_note = self.entrypoint_module.get().strip()
+        architecture_note = self.architecture_mode.get().strip()
+        run_note = self.run_command.get().strip()
+        if entrypoint_note:
+            self._append_log(f"Detected entrypoint: {entrypoint_note}")
+        if architecture_note:
+            self._append_log(f"Architecture path: {architecture_note}")
+        if run_note and run_note != "Run a modularization first.":
+            self._append_log(f"Recommended run command: {run_note}")
+
         self.status_text.set(f"Completed. Modules created in {output_dir}")
         messagebox.showinfo(
             "Success",
-            f"Modularization completed successfully.\n\nModules created in:\n{output_dir}{manifest_note}",
+            f"Modularization completed successfully.\n\nModules created in:\n{output_dir}\n\nEntrypoint:\n{entrypoint_note}\n\nRun command:\n{run_note}{manifest_note}",
         )
+
+    def _update_run_info(self) -> None:
+        output_dir = self.last_output_dir or Path(self.output_dir.get().strip())
+        manifest_path = self.last_manifest_path or (output_dir / "module_plan.json")
+        package_name = output_dir.name.strip() or "modules"
+
+        entrypoint = "Not detected"
+        architecture = "Standard module split"
+        run_command = "Run a modularization first."
+
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                module_names = [
+                    str(module.get("name", "")).strip()
+                    for module in manifest.get("modules", [])
+                    if isinstance(module, dict)
+                ]
+                notes = str(manifest.get("notes", "") or "")
+
+                if "Promoted runtime architecture" in notes:
+                    architecture = "Runtime-core architecture"
+                if "main" in module_names:
+                    entrypoint = "main"
+                elif "shared" in module_names:
+                    entrypoint = "shared"
+                elif module_names:
+                    entrypoint = module_names[0]
+
+                if entrypoint != "Not detected":
+                    run_command = f'python -m {package_name}.{entrypoint}'
+            except Exception:
+                entrypoint = "Not detected"
+                architecture = "Could not read manifest"
+                run_command = "Check module_plan.json manually."
+
+        self.entrypoint_module.set(entrypoint)
+        self.architecture_mode.set(architecture)
+        self.run_command.set(run_command)
 
 
 def main() -> None:
