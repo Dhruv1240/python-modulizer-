@@ -4,7 +4,7 @@ Turn one large Python file into a cleaner Python package with either a GUI or a 
 
 Pyfract is a better, more practical version of the tool for people who want to break up huge scripts without doing the whole split by hand. It analyzes a single-file project, groups code into modules, writes the package, and validates the result so you can catch obvious issues early.
 
-## Why Pyfract
+## Why should you use Pyfract
 
 - Built for large Python files that became hard to manage
 - Supports both GUI and CLI workflows
