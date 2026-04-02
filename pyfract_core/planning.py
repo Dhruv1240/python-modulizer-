@@ -178,7 +178,7 @@ class LLMPlanner:
         if profile == "tool_cli":
             return (
                 "Architecture target: tool/CLI file. Prefer layered modules such as "
-                "models_types, analysis_module, llmplanner_module, modulewriter_module, cli_module, shared_module. "
+                "models, analysis, planning, writing, cli, shared. "
                 "Do not force a runtime_core/main bot-style architecture."
             )
         if profile == "generic_library":
@@ -1180,24 +1180,24 @@ class LLMPlanner:
         text = f"{lowered} {signature_excerpt.lower()}"
         if kind == "class":
             if lowered in {"symbolinfo", "segment"} or "dataclass" in text:
-                return "models_types"
+                return "models"
             if any(token in lowered for token in ["analyzer", "collector", "parser", "resolver", "scope"]):
-                return "analysis_module"
+                return "analysis"
             if any(token in lowered for token in ["planner", "client"]):
-                return "llmplanner_module"
+                return "planning"
             if any(token in lowered for token in ["writer", "builder", "exporter", "renderer"]):
-                return "modulewriter_module"
+                return "writing"
             if any(token in lowered for token in ["validator", "checker", "verifier"]):
-                return "validation_module"
+                return "writing"
         if any(token in text for token in ["@app.command", "typer.typer", "__main__", "version(", "init_config(", "modularize("]):
-            return "cli_module"
+            return "cli"
         if any(token in lowered for token in ["analyze", "parse", "collect", "resolve", "dependency"]):
-            return "analysis_module"
+            return "analysis"
         if any(token in lowered for token in ["plan", "group", "sanitize", "cycle"]):
-            return "llmplanner_module"
+            return "planning"
         if any(token in lowered for token in ["write", "import", "validate", "sort_modules"]):
-            return "modulewriter_module"
-        return "shared_module"
+            return "writing"
+        return "shared"
 
     @staticmethod
     def _tool_cli_plan(
@@ -1207,13 +1207,12 @@ class LLMPlanner:
         semantic_keywords: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         preferred_order = [
-            "models_types",
-            "analysis_module",
-            "llmplanner_module",
-            "modulewriter_module",
-            "validation_module",
-            "cli_module",
-            "shared_module",
+            "models",
+            "analysis",
+            "planning",
+            "writing",
+            "cli",
+            "shared",
         ]
         buckets: Dict[str, List[str]] = {name: [] for name in preferred_order}
         for entry in metadata:
@@ -1245,7 +1244,7 @@ class LLMPlanner:
         ]
         return {
             "modules": modules,
-            "notes": "Generated via tool/CLI heuristic planning with layered modules.",
+            "notes": "Generated via tool/CLI heuristic planning with package-oriented layered modules.",
         }
 
     @staticmethod
