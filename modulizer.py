@@ -79,7 +79,7 @@ class SourceAnalyzer:
         for node in tree.body:
             if not hasattr(node, "lineno") or not hasattr(node, "end_lineno"):
                 continue
-            start = node.lineno
+            start = self._segment_start_line(node)
             end = node.end_lineno
             code = "\n".join(lines[start - 1 : end])
             kind, name = self._classify(node)
@@ -133,6 +133,20 @@ class SourceAnalyzer:
                 self.module_symbols[name] = SymbolInfo(
                     name=name, kind=kind, scope='module', defined_at_line=getattr(node, 'lineno', 0)
                 )
+
+    @staticmethod
+    def _segment_start_line(node: ast.AST) -> int:
+        start = getattr(node, "lineno", 1)
+        decorators = getattr(node, "decorator_list", None)
+        if decorators:
+            decorator_lines = [
+                getattr(decorator, "lineno", start)
+                for decorator in decorators
+                if hasattr(decorator, "lineno")
+            ]
+            if decorator_lines:
+                start = min(start, min(decorator_lines))
+        return start
 
     @staticmethod
     def _classify(node: ast.AST) -> Tuple[str, str]:
@@ -470,6 +484,85 @@ class LLMPlanner:
             return "".join(parts) if parts else None
         return str(content)
 
+    @staticmethod
+    def _detect_architecture_profile(metadata: List[Dict[str, Any]]) -> str:
+        app_signals = 0
+        cli_signals = 0
+        class_count = 0
+
+        app_terms = [
+            "bot.run(",
+            "commands.bot",
+            "discord.intents",
+            "on_ready",
+            "on_message",
+            "token",
+            "fastapi(",
+            "flask(",
+            "@app.route",
+            "@bot.event",
+            "uvicorn.run",
+        ]
+        cli_terms = [
+            "typer.typer",
+            "@app.command",
+            "argparse",
+            "click.command",
+            "parser.add_argument",
+            "def modularize",
+            "def main",
+            "__main__",
+            "init_config",
+            "version",
+        ]
+
+        for entry in metadata:
+            if entry.get("kind") == "class":
+                class_count += 1
+            text = " ".join(
+                [
+                    str(entry.get("name", "")),
+                    str(entry.get("signature_excerpt", "")),
+                    " ".join(
+                        str(sym) for sym in entry.get("defined_symbols", []) if isinstance(sym, str)
+                    ),
+                ]
+            ).lower()
+            if any(term in text for term in app_terms):
+                app_signals += 1
+            if any(term in text for term in cli_terms):
+                cli_signals += 1
+
+        if app_signals >= 3 and app_signals >= cli_signals + 1:
+            return "application_runtime"
+        if cli_signals >= 2:
+            return "tool_cli"
+        if class_count >= 3:
+            return "generic_library"
+        return "generic_script"
+
+    @staticmethod
+    def _architecture_guidance(profile: str) -> str:
+        if profile == "application_runtime":
+            return (
+                "Architecture target: application/runtime file. Prefer modules such as "
+                "runtime_core, main, data_storage, analytics, visuals, battle, economy, progression, commands."
+            )
+        if profile == "tool_cli":
+            return (
+                "Architecture target: tool/CLI file. Prefer layered modules such as "
+                "models_types, analysis_module, llmplanner_module, modulewriter_module, cli_module, shared_module. "
+                "Do not force a runtime_core/main bot-style architecture."
+            )
+        if profile == "generic_library":
+            return (
+                "Architecture target: reusable library/module file. Prefer modules such as "
+                "models, analysis, processing, io, validation, api, shared."
+            )
+        return (
+            "Architecture target: generic Python module. Prefer cohesive, low-coupling modules and avoid monolithic output."
+        )
+
     def plan(self, summary: str, segments: Sequence[Segment]) -> Dict[str, Any]:
         metadata = [
             {
@@ -483,6 +576,7 @@ class LLMPlanner:
             }
             for seg in segments
         ]
+        architecture_profile = self._detect_architecture_profile(metadata)
 
         heuristic_plan = self._fallback_plan(
             metadata,
@@ -493,16 +587,17 @@ class LLMPlanner:
         )
 
         if self.offline or self.planning_mode == "safe":
+            profile_label = architecture_profile.replace("_", " ")
             if self.offline:
-                typer.echo("Offline mode enabled: using heuristic feature-based plan.", err=True)
+                typer.echo(f"Offline mode enabled: using heuristic {profile_label} plan.", err=True)
             else:
-                typer.echo("Safe planning mode enabled: using heuristic feature-based plan.", err=True)
+                typer.echo(f"Safe planning mode enabled: using heuristic {profile_label} plan.", err=True)
             return heuristic_plan
 
         if self.planning_mode == "hybrid":
             if self._openai_client is None:
                 typer.echo(
-                    "Hybrid planning selected but no API key/client is available. Using heuristic feature-based plan.",
+                    f"Hybrid planning selected but no API key/client is available. Using heuristic {architecture_profile.replace('_', ' ')} plan.",
                     err=True,
                 )
                 return heuristic_plan
@@ -528,6 +623,7 @@ class LLMPlanner:
                     f"""
                     Improve this existing heuristic module plan without breaking it.
                     File summary: {summary}
+                    {self._architecture_guidance(architecture_profile)}
 
                     Segments (JSON):
                     {json.dumps(metadata, indent=2, default=str)}
@@ -576,6 +672,7 @@ class LLMPlanner:
                     f"""
                     You are a senior software architect. Refactor the following Python file into modules.
                     File summary: {summary}
+                    {self._architecture_guidance(architecture_profile)}
 
                     Segments (JSON):
                     {json.dumps(metadata, indent=2, default=str)}
@@ -1163,8 +1260,27 @@ class LLMPlanner:
             return {"modules": [], "notes": "No segments to process."}
 
         semantic_keywords = [k.strip().lower() for k in (semantic_keywords or []) if k.strip()]
+        architecture_profile = LLMPlanner._detect_architecture_profile(metadata)
 
         if len(metadata) >= 80:
+            if architecture_profile == "tool_cli":
+                tool_plan = LLMPlanner._tool_cli_plan(
+                    metadata=metadata,
+                    max_modules=max_modules,
+                    min_segments_per_module=min_segments_per_module,
+                    semantic_keywords=semantic_keywords,
+                )
+                if tool_plan is not None:
+                    return tool_plan
+            if architecture_profile == "generic_library":
+                library_plan = LLMPlanner._library_first_plan(
+                    metadata=metadata,
+                    max_modules=max_modules,
+                    min_segments_per_module=min_segments_per_module,
+                    semantic_keywords=semantic_keywords,
+                )
+                if library_plan is not None:
+                    return library_plan
             feature_plan = LLMPlanner._feature_first_plan(
                 metadata=metadata,
                 max_modules=max_modules,
@@ -1509,6 +1625,146 @@ class LLMPlanner:
         }
 
     @staticmethod
+    def _tool_cli_bucket(name: str, kind: str, signature_excerpt: str) -> str:
+        lowered = name.lower()
+        text = f"{lowered} {signature_excerpt.lower()}"
+        if kind == "class":
+            if lowered in {"symbolinfo", "segment"} or "dataclass" in text:
+                return "models_types"
+            if any(token in lowered for token in ["analyzer", "collector", "parser", "resolver", "scope"]):
+                return "analysis_module"
+            if any(token in lowered for token in ["planner", "client"]):
+                return "llmplanner_module"
+            if any(token in lowered for token in ["writer", "builder", "exporter", "renderer"]):
+                return "modulewriter_module"
+            if any(token in lowered for token in ["validator", "checker", "verifier"]):
+                return "validation_module"
+        if any(token in text for token in ["@app.command", "typer.typer", "__main__", "version(", "init_config(", "modularize("]):
+            return "cli_module"
+        if any(token in lowered for token in ["analyze", "parse", "collect", "resolve", "dependency"]):
+            return "analysis_module"
+        if any(token in lowered for token in ["plan", "group", "sanitize", "cycle"]):
+            return "llmplanner_module"
+        if any(token in lowered for token in ["write", "import", "validate", "sort_modules"]):
+            return "modulewriter_module"
+        return "shared_module"
+
+    @staticmethod
+    def _tool_cli_plan(
+        metadata: List[Dict[str, Any]],
+        max_modules: int,
+        min_segments_per_module: int,
+        semantic_keywords: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        preferred_order = [
+            "models_types",
+            "analysis_module",
+            "llmplanner_module",
+            "modulewriter_module",
+            "validation_module",
+            "cli_module",
+            "shared_module",
+        ]
+        buckets: Dict[str, List[str]] = {name: [] for name in preferred_order}
+        for entry in metadata:
+            bucket = LLMPlanner._tool_cli_bucket(
+                name=str(entry.get("name", "")),
+                kind=str(entry.get("kind", "")),
+                signature_excerpt=str(entry.get("signature_excerpt", "")),
+            )
+            buckets.setdefault(bucket, []).append(entry["segment_id"])
+
+        non_empty = {key: value for key, value in buckets.items() if value}
+        if len(non_empty) < 4:
+            return None
+
+        ordered = [(name, list(ids)) for name, ids in buckets.items() if ids]
+        normalized: List[Tuple[str, List[str]]] = ordered
+        if len(normalized) > max_modules:
+            while len(normalized) > max_modules and len(normalized) > 1:
+                name, ids = normalized.pop()
+                normalized[-1][1].extend(ids)
+
+        modules = [
+            {
+                "name": name,
+                "description": f"Tool/CLI architecture module for {name.replace('_', ' ')}.",
+                "segment_ids": ids,
+            }
+            for name, ids in normalized
+        ]
+        return {
+            "modules": modules,
+            "notes": "Generated via tool/CLI heuristic planning with layered modules.",
+        }
+
+    @staticmethod
+    def _library_role_bucket(name: str, kind: str, signature_excerpt: str) -> str:
+        lowered = name.lower()
+        text = f"{lowered} {signature_excerpt.lower()}"
+        if kind == "class":
+            if any(token in lowered for token in ["model", "schema", "config", "state", "info", "result"]):
+                return "models"
+            if any(token in lowered for token in ["analyzer", "parser", "collector", "resolver", "visitor"]):
+                return "analysis"
+            if any(token in lowered for token in ["writer", "reader", "loader", "saver", "serializer", "exporter"]):
+                return "io"
+            if any(token in lowered for token in ["validator", "checker", "verifier"]):
+                return "validation"
+            if any(token in lowered for token in ["manager", "service", "engine", "planner", "client"]):
+                return "processing"
+        if any(token in text for token in ["__main__", "@app.command", "typer.typer", "click.command", "argparse"]):
+            return "api"
+        if any(token in lowered for token in ["validate", "check", "verify"]):
+            return "validation"
+        if any(token in lowered for token in ["write", "read", "load", "save", "serialize", "export", "import"]):
+            return "io"
+        if any(token in lowered for token in ["analyze", "parse", "collect", "resolve"]):
+            return "analysis"
+        if any(token in lowered for token in ["plan", "process", "engine", "service", "manager"]):
+            return "processing"
+        return "shared"
+
+    @staticmethod
+    def _library_first_plan(
+        metadata: List[Dict[str, Any]],
+        max_modules: int,
+        min_segments_per_module: int,
+        semantic_keywords: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        preferred_order = ["models", "analysis", "processing", "io", "validation", "api", "shared"]
+        buckets: Dict[str, List[str]] = {name: [] for name in preferred_order}
+        for entry in metadata:
+            bucket = LLMPlanner._library_role_bucket(
+                name=str(entry.get("name", "")),
+                kind=str(entry.get("kind", "")),
+                signature_excerpt=str(entry.get("signature_excerpt", "")),
+            )
+            buckets.setdefault(bucket, []).append(entry["segment_id"])
+
+        ordered = [(name, ids) for name, ids in buckets.items() if ids]
+        if len(ordered) < 3:
+            return None
+        normalized: List[Tuple[str, List[str]]] = [(name, list(ids)) for name, ids in ordered]
+        if len(normalized) > max_modules:
+            while len(normalized) > max_modules and len(normalized) > 1:
+                name, ids = normalized.pop()
+                normalized[-1][1].extend(ids)
+
+        modules = [
+            {
+                "name": name,
+                "description": f"Library-oriented module for {name.replace('_', ' ')}.",
+                "segment_ids": ids,
+            }
+            for name, ids in normalized
+        ]
+        return {
+            "modules": modules,
+            "notes": "Generated via library-oriented heuristic planning with layered modules.",
+        }
+
+    @staticmethod
     def _simple_grouping(segments: List[Dict[str, Any]], semantic_keywords: Optional[List[str]] = None) -> List[List[str]]:
         """Fallback simple grouping when dependency analysis doesn't find relationships."""
         semantic_keywords = [k.strip().lower() for k in (semantic_keywords or []) if k.strip()]
@@ -1661,7 +1917,11 @@ class ModuleWriter:
     ) -> Path:
         output_dir.mkdir(parents=True, exist_ok=True)
         seg_map = {seg.identifier: seg for seg in segments}
-        plan = self._promote_runtime_architecture(plan, segments)
+        architecture_profile = self._detect_architecture_profile_from_segments(segments)
+        if architecture_profile == "application_runtime":
+            plan = self._promote_runtime_architecture(plan, segments)
+        elif architecture_profile == "tool_cli":
+            plan = self._promote_tool_architecture(plan, segments)
         plan = self._merge_cyclic_modules(plan, segments)
         manifest_path = output_dir / "module_plan.json"
         previous_written_files: Set[str] = set()
@@ -1707,6 +1967,63 @@ class ModuleWriter:
             )
         
         return manifest_path
+
+    @staticmethod
+    def _detect_architecture_profile_from_segments(segments: Sequence[Segment]) -> str:
+        metadata = [
+            {
+                "kind": seg.kind,
+                "name": seg.name,
+                "defined_symbols": seg.defined_symbols,
+                "signature_excerpt": seg.signature[:200],
+            }
+            for seg in segments
+        ]
+        return LLMPlanner._detect_architecture_profile(metadata)
+
+    @staticmethod
+    def _promote_tool_architecture(
+        plan: Dict[str, Any],
+        segments: Sequence[Segment],
+    ) -> Dict[str, Any]:
+        seg_map = {seg.identifier: seg for seg in segments}
+        buckets: Dict[str, List[str]] = {
+            "models_types": [],
+            "analysis_module": [],
+            "llmplanner_module": [],
+            "modulewriter_module": [],
+            "cli_module": [],
+            "shared_module": [],
+        }
+
+        for seg in segments:
+            bucket = LLMPlanner._tool_cli_bucket(
+                name=seg.name,
+                kind=seg.kind,
+                signature_excerpt=seg.signature[:200],
+            )
+            if bucket == "validation_module":
+                bucket = "modulewriter_module"
+            buckets.setdefault(bucket, []).append(seg.identifier)
+
+        modules: List[Dict[str, Any]] = []
+        for name, seg_ids in buckets.items():
+            if not seg_ids:
+                continue
+            modules.append(
+                {
+                    "name": name,
+                    "description": f"Tool architecture module for {name.replace('_', ' ')}.",
+                    "segment_ids": sorted(seg_ids, key=lambda seg_id: seg_map[seg_id].start_line),
+                }
+            )
+
+        new_plan = dict(plan)
+        new_plan["modules"] = modules
+        notes = str(plan.get("notes", "")).strip()
+        extra = "Promoted tool architecture: layered modules for models, analysis, planning, writing, CLI, and shared code."
+        new_plan["notes"] = f"{notes}\n{extra}".strip() if notes else extra
+        return new_plan
 
     @staticmethod
     def _promote_runtime_architecture(
