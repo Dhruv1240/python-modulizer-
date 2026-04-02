@@ -562,7 +562,7 @@ class ModulizerGUI:
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 module_names = [
-                    str(module.get("name", "")).strip()
+                    str(module.get("name", "")).strip().replace("/", ".").strip(".")
                     for module in manifest.get("modules", [])
                     if isinstance(module, dict)
                 ]
@@ -570,14 +570,20 @@ class ModulizerGUI:
 
                 if "Promoted runtime architecture" in notes:
                     architecture = "Runtime-core architecture"
-                if "main" in module_names:
+                if "app.cli" in module_names:
+                    entrypoint = "app.cli"
+                elif "main" in module_names:
                     entrypoint = "main"
-                elif "shared" in module_names:
-                    entrypoint = "shared"
+                elif any(name.endswith(".main") for name in module_names):
+                    entrypoint = next(name for name in module_names if name.endswith(".main"))
+                elif "shared.helpers" in module_names:
+                    entrypoint = "shared.helpers"
                 elif module_names:
                     entrypoint = module_names[0]
 
-                if entrypoint != "Not detected":
+                if (output_dir / "__main__.py").exists() and entrypoint == "app.cli":
+                    run_command = f"python -m {package_name}"
+                elif entrypoint != "Not detected":
                     run_command = f'python -m {package_name}.{entrypoint}'
             except Exception:
                 entrypoint = "Not detected"

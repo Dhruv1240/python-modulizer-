@@ -112,6 +112,7 @@ python modulizer.py modularize --input-file bot.py --output-dir modules --planni
 The output folder becomes a Python package containing:
 
 - generated module files
+- generated subpackages when the planner chooses a nested structure
 - `__init__.py`
 - `module_plan.json`
 
@@ -120,17 +121,27 @@ Example output:
 ```text
 modules/
   __init__.py
-  analytics.py
-  aura_commands.py
-  battle.py
-  bot_core.py
-  commands_general.py
-  data_storage.py
-  economy.py
-  moderation.py
-  progression.py
-  shared.py
-  visuals.py
+  commands/
+    __init__.py
+    general.py
+    aura.py
+  data/
+    __init__.py
+    storage.py
+  features/
+    __init__.py
+    analytics.py
+    battle.py
+    economy.py
+    moderation.py
+    progression.py
+    visuals.py
+  runtime/
+    __init__.py
+    bot_core.py
+  shared/
+    __init__.py
+    helpers.py
   module_plan.json
 ```
 

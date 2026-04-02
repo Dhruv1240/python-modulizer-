@@ -192,20 +192,66 @@ class LLMPlanner:
         if profile == "application_runtime":
             return (
                 "Architecture target: application/runtime file. Prefer modules such as "
-                "runtime_core, main, data_storage, analytics, visuals, battle, economy, progression, commands."
+                "runtime.core, main, data.storage, features.analytics, features.visuals, "
+                "features.battle, features.economy, features.progression, commands.general."
             )
         if profile == "tool_cli":
             return (
                 "Architecture target: tool/CLI file. Prefer layered modules such as "
-                "models, analysis, planning, writing, cli, shared. "
+                "core.models, core.analysis, core.planning, core.writing, app.cli, shared.helpers. "
                 "Do not force a runtime_core/main bot-style architecture."
             )
         if profile == "generic_library":
             return (
                 "Architecture target: reusable library/module file. Prefer modules such as "
-                "models, analysis, processing, io, validation, api, shared."
+                "core.models, core.analysis, core.processing, io.storage, validation.rules, "
+                "api.routes, shared.helpers."
             )
         return "Architecture target: generic Python module. Prefer cohesive, low-coupling modules and avoid monolithic output."
+
+    @staticmethod
+    def _package_style_module_name(name: str) -> str:
+        normalized = re.sub(r"[^a-zA-Z0-9._/]+", "_", str(name or "").strip()).strip("._/")
+        normalized = normalized.replace("/", ".")
+        normalized = re.sub(r"\.+", ".", normalized)
+        if not normalized:
+            return "module"
+
+        direct_map = {
+            "models": "core.models",
+            "analysis": "core.analysis",
+            "planning": "core.planning",
+            "writing": "core.writing",
+            "processing": "core.processing",
+            "cli": "app.cli",
+            "shared": "shared.helpers",
+            "config": "config.settings",
+            "bot_core": "runtime.bot_core",
+            "runtime_core": "runtime.core",
+            "data_storage": "data.storage",
+            "commands_general": "commands.general",
+            "commands_admin": "commands.admin",
+            "commands_economy": "commands.economy",
+            "commands_analytics": "commands.analytics",
+            "aura_commands": "commands.aura",
+            "analytics": "features.analytics",
+            "visuals": "features.visuals",
+            "battle": "features.battle",
+            "economy": "features.economy",
+            "progression": "features.progression",
+            "moderation": "features.moderation",
+            "io": "io.storage",
+            "validation": "validation.rules",
+            "api": "api.routes",
+        }
+        if normalized in direct_map:
+            return direct_map[normalized]
+        if "." in normalized:
+            return normalized
+        if "_" in normalized:
+            left, right = normalized.split("_", 1)
+            return f"{left}.{right}"
+        return normalized
 
     def plan(self, summary: str, segments: Sequence[Segment]) -> Dict[str, Any]:
         metadata = [
@@ -280,7 +326,7 @@ class LLMPlanner:
                     - Stay feature-oriented and conservative.
                     - Keep the plan at least as granular as the heuristic plan unless a merge is clearly necessary.
                     - Avoid one giant module.
-                    - Prefer useful module names like bot_core, data_storage, moderation, analytics, visuals, battle, economy, progression, commands_general, aura_commands, shared.
+                    - Prefer useful package-style module names like runtime.bot_core, data.storage, features.moderation, features.analytics, features.visuals, features.battle, features.economy, features.progression, commands.general, commands.aura, shared.helpers.
                     - If the heuristic plan is already strong, you may keep it with only better naming/descriptions.
 
                     Constraints:
@@ -321,7 +367,7 @@ class LLMPlanner:
                     {{
                       "modules": [
                         {{
-                          "name": "short_snake_case_name",
+                          "name": "package.style_name_or_short_snake_case_name",
                           "description": "purpose of the module",
                           "segment_ids": ["segment_id", ...]
                         }}
@@ -333,9 +379,9 @@ class LLMPlanner:
                     Prefer cohesive modules and avoid tiny modules unless unavoidable.
                     Avoid monolithic plans where one module contains most of the file.
                     For large bots or multi-feature files, strongly prefer feature-based modules such as:
-                    - bot_core / events / config / data_storage
-                    - commands_general / commands_admin / commands_economy / commands_analytics
-                    - aura_core / moderation / visuals / cards / battles / tournaments / shop / leaderboards
+                    - runtime.bot_core / runtime.events / config.settings / data.storage
+                    - commands.general / commands.admin / commands.economy / commands.analytics
+                    - features.moderation / features.visuals / features.cards / features.battles / features.tournaments / features.shop / features.leaderboards
                     Keep data-loading code and heavy visual generation separate from command handlers when possible.
                     Constraints:
                     - target max modules: {self.max_modules}
@@ -1179,7 +1225,7 @@ class LLMPlanner:
 
             modules.append(
                 {
-                    "name": base_name,
+                    "name": LLMPlanner._package_style_module_name(base_name),
                     "description": f"Feature-oriented module for {base_name.replace('_', ' ')}.",
                     "segment_ids": group,
                 }
@@ -1255,7 +1301,7 @@ class LLMPlanner:
 
         modules = [
             {
-                "name": name,
+                "name": LLMPlanner._package_style_module_name(name),
                 "description": f"Tool/CLI architecture module for {name.replace('_', ' ')}.",
                 "segment_ids": ids,
             }
@@ -1321,7 +1367,7 @@ class LLMPlanner:
 
         modules = [
             {
-                "name": name,
+                "name": LLMPlanner._package_style_module_name(name),
                 "description": f"Library-oriented module for {name.replace('_', ' ')}.",
                 "segment_ids": ids,
             }
