@@ -27,7 +27,7 @@ def version() -> None:
 def init_config(output_file: Path = typer.Option("pyfract_config.json", help="Path to create config file.")) -> None:
     """Generate a sample configuration file."""
     sample_config = {
-        "model": LLMPlanner.DEFAULT_MODEL,
+        "model": "",
         "api_key": "<YOUR_API_KEY>",
         "openai_base_url": LLMPlanner.DEFAULT_BASE_URL,
         "planning_mode": "safe",
@@ -56,7 +56,14 @@ def init_config(output_file: Path = typer.Option("pyfract_config.json", help="Pa
 def modularize(
     input_file: Path = typer.Option(..., exists=True, readable=True, help="Python file to split."),
     output_dir: Path = typer.Option(..., help="Directory to write modules."),
-    model: Optional[str] = typer.Option(None, help=f"Chat model (default {LLMPlanner.DEFAULT_MODEL!r})."),
+    model: Optional[str] = typer.Option(
+        None,
+        help=(
+            "Chat model name for the configured LLM API. Supports any provider-specific "
+            "model id. If omitted, MODULIZER_MODEL / OPENAI_MODEL / OPENROUTER_MODEL / "
+            "LLM_MODEL is used."
+        ),
+    ),
     api_key: Optional[str] = typer.Option(None, help="API key (overrides OPENAI_API_KEY)."),
     offline: bool = typer.Option(False, help="Skip AI entirely; use heuristic plan only."),
     openai_base_url: Optional[str] = typer.Option(
@@ -105,7 +112,7 @@ def modularize(
         except (json.JSONDecodeError, IOError) as exc:
             typer.echo(f"Warning: Failed to load config file {config}: {exc}", err=True)
 
-    model = model or config_data.get("model") or LLMPlanner.DEFAULT_MODEL
+    model = model or config_data.get("model") or LLMPlanner.resolve_model()
     api_key = api_key or config_data.get("api_key")
     openai_base_url = openai_base_url or config_data.get("openai_base_url")
     planning_mode = str(planning_mode or config_data.get("planning_mode") or "safe").strip().lower()
@@ -202,3 +209,6 @@ def modularize(
     except Exception as exc:
         typer.echo(f"Error: Failed to write modules: {exc}", err=True)
         raise typer.Exit(1)
+
+
+

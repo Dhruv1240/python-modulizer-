@@ -17,7 +17,8 @@ class LLMPlanner:
     """Matches typical OpenAI-client usage (e.g. AIMLAPI at https://ai.aimlapi.com)."""
 
     DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-    DEFAULT_MODEL = "gemini-2.5-flash"
+    DEFAULT_MODEL = ""
+    MODEL_ENV_VARS = ("MODULIZER_MODEL", "OPENAI_MODEL", "OPENROUTER_MODEL", "LLM_MODEL")
     PLANNING_MODES = {"safe", "hybrid", "ai_first"}
 
     @staticmethod
@@ -25,6 +26,19 @@ class LLMPlanner:
         if isinstance(value, OptionInfo):
             return default
         return value
+
+    @classmethod
+    def resolve_model(cls, value: Any = None) -> Optional[str]:
+        normalized = cls._normalize_option(value, None)
+        if isinstance(normalized, str):
+            normalized = normalized.strip()
+            if normalized:
+                return normalized
+        for env_name in cls.MODEL_ENV_VARS:
+            env_value = os.environ.get(env_name)
+            if env_value and env_value.strip():
+                return env_value.strip()
+        return None
 
     def __init__(
         self,
@@ -45,7 +59,7 @@ class LLMPlanner:
         allow_heuristic_fallback: bool = False,
         planning_mode: str = "safe",
     ) -> None:
-        self.model = self._normalize_option(model, self.DEFAULT_MODEL)
+        self.model = self.resolve_model(model)
         self.temperature = float(self._normalize_option(temperature, 0.9))
         self.top_p = float(self._normalize_option(top_p, 0.3))
         self.top_k = int(self._normalize_option(top_k, 20))
@@ -76,6 +90,11 @@ class LLMPlanner:
 
         needs_ai_client = self.planning_mode in {"hybrid", "ai_first"} and not self.offline
         if needs_ai_client:
+            if not self.model:
+                raise RuntimeError(
+                    'Missing model. Use --model, set "model" in the config file, or set '
+                    "MODULIZER_MODEL, OPENAI_MODEL, OPENROUTER_MODEL, or LLM_MODEL."
+                )
             key = api_key or os.environ.get("OPENAI_API_KEY")
             if not key and self.planning_mode == "ai_first":
                 raise RuntimeError("Missing API key. Use --api-key or set OPENAI_API_KEY.")
@@ -1418,3 +1437,6 @@ class LLMPlanner:
             normalized.pop(right)
 
         return normalized
+
+
+

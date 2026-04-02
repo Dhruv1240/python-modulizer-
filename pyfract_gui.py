@@ -38,7 +38,15 @@ class ModulizerGUI:
         self.entrypoint_module = tk.StringVar(value="Not detected yet.")
         self.run_command = tk.StringVar(value="Run a modularization first.")
         self.architecture_mode = tk.StringVar(value="Not detected yet.")
-        self.model = tk.StringVar(value=modulizer.LLMPlanner.DEFAULT_MODEL)
+        self.model = tk.StringVar(
+            value=(
+                os.environ.get("MODULIZER_MODEL")
+                or os.environ.get("OPENAI_MODEL")
+                or os.environ.get("OPENROUTER_MODEL")
+                or os.environ.get("LLM_MODEL")
+                or ""
+            ).strip()
+        )
         self.planning_mode = tk.StringVar(value="safe")
         self.api_key = tk.StringVar()
         self.openai_base_url = tk.StringVar(value=modulizer.LLMPlanner.DEFAULT_BASE_URL)
@@ -592,3 +600,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
