@@ -25,8 +25,8 @@ If you are new to code organization, refactoring, or package structure, Pyfract 
 
 ## Highlights
 
-- Desktop GUI for normal users: [`modulizer_gui.py`](c:\modulizer\modulizer_gui.py)
-- CLI for scripting and repeatable runs: [`modulizer.py`](c:\modulizer\modulizer.py)
+- Desktop GUI for normal users: [`pyfract_gui.py`](c:\modulizer\pyfract_gui.py)
+- CLI for scripting and repeatable runs: [`pyfract.py`](c:\modulizer\pyfract.py)
 - Three planning modes: `safe`, `hybrid`, `ai_first`
 - Feature-based grouping for large multi-purpose files
 - Validation after generation
@@ -78,7 +78,7 @@ AI planning before anything else.
 ### GUI
 
 ```powershell
-python modulizer_gui.py
+python pyfract_gui.py
 ```
 
 Recommended settings for large files:
@@ -92,19 +92,19 @@ Recommended settings for large files:
 Safe mode:
 
 ```powershell
-python modulizer.py modularize --input-file bot.py --output-dir modules --planning-mode safe
+python pyfract.py modularize --input-file bot.py --output-dir modules --planning-mode safe
 ```
 
 Hybrid mode:
 
 ```powershell
-python modulizer.py modularize --input-file bot.py --output-dir modules --planning-mode hybrid
+python pyfract.py modularize --input-file bot.py --output-dir modules --planning-mode hybrid
 ```
 
 AI-first mode:
 
 ```powershell
-python modulizer.py modularize --input-file bot.py --output-dir modules --planning-mode ai_first
+python pyfract.py modularize --input-file bot.py --output-dir modules --planning-mode ai_first
 ```
 
 ## What Gets Generated
@@ -227,13 +227,13 @@ In general:
 Create a sample config:
 
 ```powershell
-python modulizer.py init-config --output-file modulizer_config.json
+python pyfract.py init-config --output-file pyfract_config.json
 ```
 
 Run using that config:
 
 ```powershell
-python modulizer.py modularize --input-file bot.py --output-dir modules --config modulizer_config.json
+python pyfract.py modularize --input-file bot.py --output-dir modules --config pyfract_config.json
 ```
 
 ## GUI Notes
@@ -248,8 +248,8 @@ The GUI is designed to be more friendly for normal users and beginners. It inclu
 
 ## Project Files
 
-- [`modulizer.py`](c:\modulizer\modulizer.py): CLI and planning engine
-- [`modulizer_gui.py`](c:\modulizer\modulizer_gui.py): desktop GUI
+- [`pyfract.py`](c:\modulizer\pyfract.py): CLI and planning engine
+- [`pyfract_gui.py`](c:\modulizer\pyfract_gui.py): desktop GUI
 - [`build_exe.ps1`](c:\modulizer\build_exe.ps1): packaging helper
 
 ## Recommendations
